@@ -1,7 +1,8 @@
 use std::{sync::mpsc, thread};
 
 use color_eyre::eyre::Result;
-use ratatui::{DefaultTerminal, Frame, layout::{Constraint, Layout}, style::{Color, Style, Stylize}, symbols::border, text::Line, widgets::{Block, Cell, Padding, Paragraph, Row, Table, Widget}};
+use crossterm::event::{KeyCode, KeyEventKind};
+use ratatui::{DefaultTerminal, Frame, layout::{Constraint, Layout, Rect}, style::{Color, Style, Stylize}, symbols::border, text::Line, widgets::{Block, Cell, Padding, Paragraph, Row, Scrollbar, ScrollbarState, Table, TableState}};
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, System};
 
 fn main() -> Result<()> {
@@ -12,7 +13,9 @@ fn main() -> Result<()> {
     let mut app = App {
         exit: false,
         processes: Vec::new(),
-        system_info: SystemInfo { uptime: 0 }
+        system_info: SystemInfo { uptime: 0 },
+        table_state: TableState::default(),
+        scrollbar_state: ScrollbarState::default()
     };
     get_sys_info(&mut app.system_info);
 
@@ -33,7 +36,9 @@ fn main() -> Result<()> {
 pub struct App {
     exit: bool,
     processes: Vec<ProcessInfo>,
-    system_info: SystemInfo
+    system_info: SystemInfo,
+    table_state: TableState,
+    scrollbar_state: ScrollbarState
 }
 
 struct SystemInfo {
@@ -56,39 +61,83 @@ enum Event {
 impl App {
     fn run(&mut self, terminal:&mut DefaultTerminal, rx: mpsc::Receiver<Event>) -> Result<()> {
         while !self.exit {
-            while let Ok(event) = rx.try_recv() {
-                match event {
-                    Event::Input(key) => {
-                        if key.code == crossterm::event::KeyCode::Char('q') {
-                            self.exit = true;
-                        }
-                    }
-
-                    Event::Processes(procs) => {
-                        self.processes = procs;
-                    }
-
-                    Event::SystemInfo(info) => {
-                        self.system_info = info;
-                    }
-                }
-            }
-
+            self.handle_events(&rx);
             terminal.draw(|frame| self.draw(frame))?;
         }
 
         Ok(())
     }
 
-    fn draw(&self, frame:&mut Frame) {
-        frame.render_widget(self, frame.area());
+    fn handle_events(&mut self, rx: &mpsc::Receiver<Event>) {
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Event::Input(key) => self.handle_key(key),
+                Event::Processes(procs) => self.processes = procs,
+                Event::SystemInfo(info) => self.system_info = info,
+            }
+        }
     }
-}
 
-// need &App for scoping. Because &App is an immutable reference.
-// eg. can not change self.exit in this context
-impl Widget for &App {
-    fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) where Self: Sized {
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('q') => self.exit = true,
+            KeyCode::Down => {
+                let i = match self.table_state.selected() {
+                    Some(i) => {
+                        if i + 1 >= self.processes.len() {
+                            i
+                        }
+                        else {
+                            i + 1
+                        }
+                    }
+                    None => 0
+                };
+                self.table_state.select(Some(i));
+            },
+            KeyCode::Up => {
+                let i = match self.table_state.selected() {
+                    Some(i) if i > 0 => i - 1,
+                    _ => 0
+                };
+                self.table_state.select(Some(i));
+            },
+            _ => {}
+        }
+    }
+
+    fn draw(&mut self, frame:&mut Frame) {
+        // frame.render_widget(self, frame.area());
+        let chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(0)
+            ])
+            .split(frame.area());
+
+        self.render_system_info(frame, chunks[0]);
+        self.render_process_table(frame, chunks[1]);
+    }
+
+    fn render_system_info(&mut self, frame: &mut Frame, area: Rect) {
+        let info = Paragraph::new(vec![
+            Line::from(format!("Uptime: {}", format_time(self.system_info.uptime)))
+        ])
+        .block(Block::bordered()
+            .title(" System ")
+            .border_set(border::ROUNDED)
+            .padding(Padding::new(1, 1, 1, 1))
+        );
+
+        frame.render_widget(info, area);
+    }
+
+    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) {        
         let title = Line::from(" TuiTop Process Manager ").bold();
     
         let instruct = Line::from(vec![
@@ -101,31 +150,22 @@ impl Widget for &App {
             " Sort by ".into(),
             "<←, →> ".blue().bold()
         ]);
-    
-        let chunks = Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                Constraint::Length(10),
-                Constraint::Min(0)
-            ])
-            .split(area);
 
-
-        // -----------------------------------------------------------------------------------------------
-        let info = Paragraph::new(vec![
-            Line::from(format!("Uptime: {}", format_time(self.system_info.uptime)))
-        ])
-        .block(Block::bordered().title(" System ").border_set(border::ROUNDED).padding(Padding::new(1, 1, 1, 1)));
-
-        info.render(chunks[0], buf);
-
-        // -----------------------------------------------------------------------------------------------
         let block = Block::bordered()
             .padding(Padding::new(2, 2, 1, 1))
             .title(title)
             .title_bottom(instruct)
             .border_set(border::ROUNDED);
     
+        let inner = block.inner(area);
+
+        let layout = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(1)
+        ])
+        .split(inner);
+
+        // Table
         let rows = self.processes.iter().map(|p| {
             Row::new(vec![
                 p.pid.to_string(),
@@ -156,9 +196,33 @@ impl Widget for &App {
                 // .bg(Color::Rgb(107, 88, 133))
         )
         .block(block)
-        .column_spacing(1);
+        .column_spacing(1)
+        .row_highlight_style(Style::default().bg(Color::Blue).bold());
+        
+        frame.render_stateful_widget(
+            table,
+            area,
+            &mut self.table_state,
+        );
 
-        table.render(chunks[1], buf);
+        // Scrollbar
+        let total = self.processes.len();
+        let selected = self.table_state.selected().unwrap_or(0);
+
+        self.scrollbar_state = self
+            .scrollbar_state
+            .content_length(total)
+            .position(selected);
+
+        let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().bg(Color::Gray))
+            .track_style(Style::default().fg(Color::DarkGray));
+
+        frame.render_stateful_widget(
+            scrollbar,
+            layout[1],
+            &mut self.scrollbar_state,
+        );
     }
 }
 
@@ -203,8 +267,6 @@ fn run_background_thread(tx: mpsc::Sender<Event>) {
 }
 
 fn get_sys_info(system_info:&mut SystemInfo) {
-    // let sys = System::new_all();
-
     system_info.uptime = System::uptime();
 }
 
