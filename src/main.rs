@@ -1,4 +1,4 @@
-use std::{sync::mpsc, thread};
+use std::{cmp::Ordering, sync::mpsc, thread};
 
 use color_eyre::eyre::Result;
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -15,7 +15,9 @@ fn main() -> Result<()> {
         processes: Vec::new(),
         system_info: SystemInfo { uptime: 0 },
         table_state: TableState::default(),
-        scrollbar_state: ScrollbarState::default()
+        scrollbar_state: ScrollbarState::default(),
+        sort_column: 0,
+        sort_desc: true,
     };
     get_sys_info(&mut app.system_info);
 
@@ -38,7 +40,9 @@ pub struct App {
     processes: Vec<ProcessInfo>,
     system_info: SystemInfo,
     table_state: TableState,
-    scrollbar_state: ScrollbarState
+    scrollbar_state: ScrollbarState,
+    sort_column: usize,
+    sort_desc: bool,
 }
 
 struct SystemInfo {
@@ -52,11 +56,45 @@ struct ProcessInfo {
     ram_usage: u64
 }
 
+struct Column {
+    id: &'static str,
+    title: &'static str,
+    cmp: fn(&ProcessInfo, &ProcessInfo) -> Ordering,
+}
+
 enum Event {
     Input(crossterm::event::KeyEvent),
     Processes(Vec<ProcessInfo>),
     SystemInfo(SystemInfo)
 }
+
+static COLUMNS: &[Column] = &[
+    Column {
+        id: "pid",
+        title: "PID",
+        cmp: |a, b| a.pid.cmp(&b.pid),
+    },
+    Column {
+        id: "name",
+        title: "NAME",
+        cmp: |a, b| a.name.cmp(&b.name),
+    },
+    Column {
+        id: "cpu",
+        title: "CPU%",
+        cmp: |a, b| {
+            a.cpu_usage
+                .partial_cmp(&b.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        },
+    },
+    Column {
+        id: "mem",
+        title: "MEM",
+        cmp: |a, b| a.ram_usage.cmp(&b.ram_usage),
+    },
+];
+
 
 impl App {
     fn run(&mut self, terminal:&mut DefaultTerminal, rx: mpsc::Receiver<Event>) -> Result<()> {
@@ -72,7 +110,10 @@ impl App {
         while let Ok(event) = rx.try_recv() {
             match event {
                 Event::Input(key) => self.handle_key(key),
-                Event::Processes(procs) => self.processes = procs,
+                Event::Processes(procs) => {
+                    self.processes = procs;
+                    self.sort_processes();
+                }
                 Event::SystemInfo(info) => self.system_info = info,
             }
         }
@@ -106,6 +147,15 @@ impl App {
                 };
                 self.table_state.select(Some(i));
             },
+            KeyCode::Left => {
+                self.sort_column = (self.sort_column + COLUMNS.len() - 1) % COLUMNS.len();
+            },
+            KeyCode::Right => {
+                self.sort_column = (self.sort_column + 1) % COLUMNS.len();
+            }
+            KeyCode::Char('s') => {
+                self.sort_desc = !self.sort_desc;
+            }
             _ => {}
         }
     }
@@ -139,6 +189,7 @@ impl App {
 
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) {        
         let title = Line::from(" TuiTop Process Manager ").bold();
+        let sort_direction = if self.sort_desc { " Sort Asc " } else { " Sort Desc " };
     
         let instruct = Line::from(vec![
             " Quit ".into(),
@@ -148,7 +199,10 @@ impl App {
             "<↑, ↓> ".blue().bold(),
             "-".into(),
             " Sort by ".into(),
-            "<←, →> ".blue().bold()
+            "<←, →> ".blue().bold(),
+            "-".into(),
+            sort_direction.into(),
+            "<s> ".blue().bold()
         ]);
 
         let block = Block::bordered()
@@ -185,15 +239,15 @@ impl App {
             ],
         )
         .header(
-            Row::new(vec![
-                    Cell::from("PID").style(Style::default().bg(Color::White).fg(Color::Black)),
-                    Cell::from("NAME"),
-                    Cell::from("CPU%"),
-                    Cell::from("MEM")
-                ])
-                .bold()
-                .bg(Color::Rgb(100, 133, 88))
-                // .bg(Color::Rgb(107, 88, 133))
+            Row::new(COLUMNS.iter().enumerate().map(|(i, col)| {
+                    let mut title = col.title.to_string();
+                    if i == self.sort_column {
+                        title.push(if self.sort_desc { '↓' } else { '↑' });
+                    }
+                    Cell::from(title)
+                }))
+            .bold()
+            .bg(Color::Rgb(100, 133, 88))
         )
         .block(block)
         .column_spacing(1)
@@ -224,6 +278,17 @@ impl App {
             &mut self.scrollbar_state,
         );
     }
+
+    fn sort_processes(&mut self) {
+        let column = &COLUMNS[self.sort_column];
+        let desc = self.sort_desc;
+
+        self.processes.sort_by(|a, b| {
+            let ord = (column.cmp)(a, b);
+            if desc { ord.reverse() } else { ord }
+        });
+    }
+
 }
 
 fn handle_input_events(tx: mpsc::Sender<Event>) {
