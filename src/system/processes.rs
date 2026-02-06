@@ -20,17 +20,17 @@ pub struct Column {
 pub static COLUMNS: &[Column] = &[
     Column {
         id: "pid",
-        title: "PID",
+        title: "PID ",
         cmp: |a, b| a.pid.cmp(&b.pid),
     },
     Column {
         id: "name",
-        title: "NAME",
+        title: "NAME ",
         cmp: |a, b| a.name.cmp(&b.name),
     },
     Column {
         id: "cpu",
-        title: "CPU%",
+        title: "CPU% ",
         cmp: |a, b| {
             a.cpu_usage
                 .partial_cmp(&b.cpu_usage)
@@ -39,7 +39,7 @@ pub static COLUMNS: &[Column] = &[
     },
     Column {
         id: "mem",
-        title: "MEM",
+        title: "MEM ",
         cmp: |a, b| a.ram_usage.cmp(&b.ram_usage),
     },
 ];
